@@ -1,5 +1,205 @@
 ---
-title: "demo"
+title: "exercice"
 format: html
 ---
+
+# Task 1
+
+## Import data
+```{r}
+library(sf)
+library("readr")
+library(terra)
+
+wildschwein <- read_delim("wildschwein_BE_2056.csv", ",") |>
+    st_as_sf(coords = c("E", "N"), crs = 2056, remove = FALSE)
+Feld <- read_sf("Feldaufnahmen_Fanel.gpkg")
+my_tif <- rast("vegetationshoehe_LFI.tif")
+plot(my_tif)
+```
+## Questions about dataset
+a) What information does the dataset contain?
+Koordinaten von verschiedenen Ackerkulturen
+b) What is the geometry type of the dataset (possible types are: Point, Lines and Polygons)?
+Polygon
+c) What are the data types of the other columns?
+Double and character 
+d) What is the coordinate system of the dataset?
+CH1903+ / LV95
+
+# Task 2
+```{r}
+#filter wild boar data
+library(lubridate)
+library(dplyr)
+wildschwein <- wildschwein %>%
+  filter(month(DatetimeUTC) %in% c(5, 6))
+#st join 
+joineddata<- st_join(wildschwein, Feld)
+```
+
+# Task 3 
+```{r}
+#visualisation
+#which fields was more visited by the wildschwein 
+library(ggplot2)
+
+joineddata %>%
+  st_drop_geometry() %>%
+  count(TierName, Frucht, sort = TRUE) %>%
+  ggplot(aes(x = Frucht, y = n, fill = TierName)) +
+  geom_col(position = "dodge") +
+  coord_flip() +
+  labs(
+    x = "Polygon / crop type",
+    y = "Number of GPS points",
+    fill = "Wild boar"
+  )
+#temporal analysis 
+library(dplyr)
+library(lubridate)
+library(ggplot2)
+library(sf)
+
+wildschwein_clean <- joineddata %>%
+  st_drop_geometry() %>%
+  mutate(
+    date = as.Date(DatetimeUTC),
+    Frucht = ifelse(is.na(Frucht), "Unknown", as.character(Frucht))
+  )
+
+# Keep only the most common crop types, group the rest as "Other"
+top_frucht <- wildschwein_clean %>%
+  count(Frucht, sort = TRUE) %>%
+  slice_head(n = 6) %>%
+  pull(Frucht)
+
+wildschwein_plot <- wildschwein_clean %>%
+  mutate(
+    Frucht_group = ifelse(Frucht %in% top_frucht, Frucht, "Other")
+  )
+
+# Dominant crop type per day and wild boar
+daily_dominant <- wildschwein_plot %>%
+  count(TierName, date, Frucht_group) %>%
+  group_by(TierName, date) %>%
+  slice_max(n, n = 1, with_ties = FALSE) %>%
+  ungroup()
+
+ggplot(daily_dominant, aes(x = date, y = TierName, fill = Frucht_group)) +
+  geom_tile(height = 0.75) +
+  labs(
+    x = "Date",
+    y = "Wild boar",
+    fill = "Dominant polygon / crop type",
+    title = "Dominant visited crop type per day and wild boar"
+  ) +
+  theme_minimal()
+```
+
+# Task 4 
+already done in 1 
+
+# Task 5 
+```{r}
+library(terra)
+# 1. Convertir les points sf en SpatVector
+wildschwein_vect <- terra::vect(wildschwein)
+
+# 2. Extraire la valeur du raster pour chaque point
+tif_values <- terra::extract(my_tif, wildschwein_vect)
+
+# 3. Enlever la colonne ID créée par terra
+tif_values <- tif_values %>%
+  select(-ID)
+
+# 4. Ajouter la valeur extraite au dataset original
+new_join <- bind_cols(wildschwein, tif_values)
+
+
+```
+visualisation
+```{r}
+library(sf)
+library(dplyr)
+library(lubridate)
+library(ggplot2)
+library(tidyr)
+library(scales)
+
+# Préparer les données
+plot_data <- new_join %>%
+  st_drop_geometry() %>%
+  mutate(
+    DatetimeUTC = as.POSIXct(DatetimeUTC, tz = "UTC"),
+    hour_round = hour(round_date(DatetimeUTC, unit = "hour")),
+    
+    vegetation_class = cut(
+      vegetationshoehe_LFI,
+      breaks = c(-Inf, 5, 10, 15, 20, 25, Inf),
+      labels = c(
+        "0-5 m",
+        "5-10 m",
+        "10-15 m",
+        "15-20 m",
+        "20-25 m",
+        ">25 m"
+      ),
+      right = FALSE
+    ),
+    
+    vegetation_class = as.character(vegetation_class),
+    vegetation_class = ifelse(is.na(vegetation_class), "No data", vegetation_class)
+  )
+
+# Compter les points GPS par sanglier, heure et classe de végétation
+hourly_counts <- plot_data %>%
+  count(TierName, hour_round, vegetation_class)
+
+# Compléter les heures manquantes
+hourly_counts <- hourly_counts %>%
+  complete(
+    TierName,
+    hour_round = 0:23,
+    vegetation_class,
+    fill = list(n = 0)
+  )
+
+# Calculer les pourcentages
+hourly_props <- hourly_counts %>%
+  group_by(TierName, hour_round) %>%
+  mutate(
+    percentage = n / sum(n)
+  ) %>%
+  ungroup()
+
+# Ordre des classes dans la légende
+hourly_props <- hourly_props %>%
+  mutate(
+    vegetation_class = factor(
+      vegetation_class,
+      levels = c("0-5 m", "5-10 m", "10-15 m", "15-20 m", "20-25 m", ">25 m", "No data")
+    )
+  )
+
+# Graphique
+percent<- ggplot(hourly_props, aes(x = hour_round, y = percentage, fill = vegetation_class)) +
+  geom_col(width = 1) +
+  facet_wrap(~ TierName, nrow = 1) +
+  scale_y_continuous(labels = percent_format(accuracy = 1)) +
+  scale_x_continuous(breaks = seq(0, 23, by = 5)) +
+  labs(
+    x = "Time (rounded to the nearest hour)",
+    y = "Percentage",
+    fill = "Vegetation height",
+    title = "Vegetation height use by wild boar over the day"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    panel.grid.minor = element_blank(),
+    strip.text = element_text(size = 14, face = "bold"),
+    legend.position = "bottom"
+  )
+percent
+```
 
